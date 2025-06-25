@@ -3,139 +3,167 @@ namespace tjg {
 template<typename... Args>
 [[noreturn]]
 void LogTerminate(std::format_string<Args...> fmt, Args&&... args) noexcept {
-  std::println(std::clog, fmt, args...);
+  std::println(std::clog, fmt, std::forward<Args>(args)...);
   std::clog.flush();
   std::terminate();
 } // LogTerminate
 
 class File {
 public:
-  using path = std::filesystem::path;
+  using path     = std::filesystem::path;
+  using optional = std::optional;
 
-  using czstring = gsl::czstring;
   using not_null = gsl::not_null;
+  using zstring  = gsl::zstring;
+  using czstring = gsl::czstring;
+  using str_rv   = not_null<zstring>;
   using str_arg  = not_null<czstring>;
 
-  inline constexpr auto EOF = std::char_traits<char>::eof;
+  using char_t   = char;
+  using traits_t = std::char_traits<char_t>;
+  using string_view = std::basic_string_view<char_t>;
+
+  inline constexpr auto EOF = traits_t::eof;
+
+  class Error: public std::exception {
+    const std::string _what;
+  public:
+    czstring what() const override noexcept { return what_str.c_str(); }
+    explicit Error(const std::string& what_) : _what{what_} { }
+  }; // Error
 
 private:
-  [[noreturn]]
-  static void DtorError(str_arg what) noexcept {
-    auto err = std:error_code{errno, std::system_category{}};
-    LogTerminate("File::DtorError: {}: {}", what, err.message());
-  }
-
-  static void Close(std::FILE* fp) noexcept {
-    if (std::fclose(fp) != 0)
-      DtorError("fclose");
-  }
-
-  using unique_file_t = std::unique_ptr<std::FILE, decltype(&Close)>;
-  unique_file_t _fp;
+  std:FILE* _fp = nullptr;
   path _name;
 
-public:
-  // Only these 2 member functions are valid after calling close().
-  bool is_open() const noexcept { return bool(_fp); }
-  const path& path() const { return _name; }
+  void reset() noexcept { _fp = nullptr; _name.clear(); }
 
-  not_null<FILE*> get() { return _fp.get(); }
+  std::string error_string(const std::string& what) const
+  { return "File " + _name + ": " + what; }
 
-private:
-  inline void check(bool cond, const std::string& what) {
-    if (cond)
-      return;
+  [[noreturn]] void throw_error(const std::string& what) const
+    { throw Error{error_string(what)}; }
+
+  [[noreturn]] void throw_errno(const std::string& what) const {
     auto err = std::error_code{errno, std::system_category{}};
-    throw std::system_error{err, _name + ": " + what};
-  } // check
-
-  void do_flush() {
-    auto err = std::fflush(get());
-    check((err == 0), "fflush");
+    throw std::system_error{err, error_string(what)};
   }
 
-  void do_close() {
-    auto err = std::fclose(get());
-    _fp.reset();
-    return check((err == 0), "fclose");
-  }
+#ifdef _POSIX_VERSION
+#define TJG_FILE_POSIX_THROW(what) throw_errno(what)
+#else
+#define TJG_FILE_POSIX_THROW(what) throw_error(what)
+#endif
 
-  void do_open(path name, str_arg mode) {
-    _name = std::move(name);
-    auto fp = std::fopen(_name.c_str(), mode);
-    check((fp != nullptr), "fopen");
-    _fp.reset(fp);
-  } // do_open
+  static inline constexpr int IntChar(char_t c)
+    { return static_cast<int>(static_cast<unsigned char>(c)); }
 
 public:
-  void open(path name, str_arg mode)
-  { do_open(std::move(name), mode); }
+  // Only these 4 member functions are valid after calling close().
+  operator std::FILE*() noexcept { return _fp; }
+  bool is_open() const noexcept { return (_fp != nullptr); }
+  const path& name() const noexcept { return _name; }
 
-  File() = default;
+  ~File() noexcept {
+    if (_fp == nullptr)
+      return;
+    auto rval = std::fclose(_fp);
+    if (rval == 0)
+      return;
+    LogTerminate("~File: fclose returned {}: errno={}",
+                                                   rval, std::strerror(errno));
+  }
+
+  void close() {
+    if (_fp == nullptr)
+      return;
+    auto err = std::fclose(_fp);
+    _fp = nullptr;
+    if (err == 0) throw_error("fclose");
+  }
+
+  void open(path name, str_arg mode) {
+    close();
+    _name = std::move(name);
+    _fp   = std::fopen(_name.c_str(), mode);
+    if (_fp == nullptr)
+      TJG_FILE_POSIX_THROW("fopen");
+  } // open
+
+  File() noexcept = default;
+
+  explicit File(not_null<FILE*> fp_, path name_=path{}) noexcept
+    : _fp(fp_), _name(name_) { }
 
   explicit File(std::filesystem::path name, str_arg mode)
-  { do_open(name, mode); }
-
-  virtual ~File() = default;
+  { open(std::move(name), mode); }
 
   File(const File&) = delete;
-  File(File&& f) = default;
-  File& operator=(const File&) = default;
+  File& operator=(const File& f) = delete;
 
-  void swap(File& other) noexcept { std::swap(_fp, other._fp); }
+  File(File&& f) noexcept : _fp{f._fp}, _name{std::move(f._name)}
+  { f._fp = nullptr; }
 
-  bool close() { return do_close(); }
-
-  void clearerr() noexcept { std::clearerr(get()); }
-
-  bool eof()   const noexcept { return (std::feof(get())   != 0); }
-  bool error() const noexcept { return (std::ferror(get()) != 0); }
-  void flush() { check((std::fflush(get()) == 0), "fflush"); }
-
-  int getc() {
-    int ch = std::fgetc(get());
-    if (ch == EOF)
-      check(!error(), "fgetc");
-    return ch;
+  File& operator=(File&& f) {
+    if (&f == this)
+      return;
+    close();
+    _fp   = f._fp;
+    _name = std::move(f._name);
+    f._fp = nullptr;
   }
 
-  std::fpos_t getpos() const {
-    auto rval = std::fpos_t{};
-    check((std::fgetpos(get(), &rval) == 0), "fgetpos");
+  void swap(File& f) noexcept {
+    std::swap(_fp,   f._fp);
+    std::swap(_name, f._name);
+  }
+
+  void clearerr()    noexcept { std::clearerr(_fp); }
+  bool eof()   const noexcept { return (std::feof(_fp)   != 0); }
+  bool error() const noexcept { return (std::ferror(_fp) != 0); }
+  bool flush()       noexcept { return (std::fflush(_fp) == 0); }
+
+  opt_char getc() {
+    auto ch = std::fgetc(_fp);
+    if (ch != EOF)
+      return opt_char{gsl::narrow<char_t>(ch)};
+    if (!eof()) throw_error("fgetc");
+    return opt_char{};
+  }
+
+  void gets(not_null<zstring> s, int count) {
+    Expects(count > 1);
+    auto rval = std::fgets(s, count);
+    if (rval == nullptr)
+      TJG_FILE_POSIX_THROW("fgets");
+  }
+
+  template<typename... Args>
+  int printf(str_arg fmt, Args&&... args) {
+    int rval = std::fprintf(_fp, format, std::forward<Args>(args)...);
+    if (rval < 0)
+      TJG_FILE_POSIX_THROW("fprintf");
     return rval;
   }
 
-  std::string_view gets(std::string_view sv) {
-    auto rval = std::fgets(sv.begin(), sv.size(), get());
-    check((rval != nullptr), "fgets");
-    return sv;
+  void putc(char_t ch) {
+    auto rval = std::fputc(IntChar(ch), _fp);
+    if (rval == EOF) throw_error("fputc");
   }
 
-  int printf(str_arg fmt, auto... args) {
-    int rval = std::fprintf(get(), format, args...);
-    check((rval >= 0), "fprintf");
-    return rval;
+  void puts(not_null<zstring> s) {
+    auto rval = std::fputs(s, _fp);
+    if (rval < 0) throw_error("fputs");
   }
 
-  void putc(int ch)
-  { check((std::fputc(ch, get()) == EOF), "fputc"); }
-
-  void puts(std::string_view sv) {
-    auto rval = std::fputs(sv.begin(), sv.size(), get());
-    check((rval != EOF), "fputs");
-  }
-
-private:
   std::size_t read(void* buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return 0;
-    auto rval = std::fread(buf, size, count, get());
-    if (rval == 0)
-      check(!error(), "fread");
+    std::size_t rval = std::fread(buf, size, count, _fp);
+    if (rval == 0 && !eof() && error()) throw_error("fread");
     return rval;
   }
 
-public:
   template<typename T>
   concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
@@ -144,69 +172,83 @@ public:
   { return read(buf.data(), sizeof(T), buf.size()); }
 
   int scanf(str_arg format, auto&... args) {
-    auto rval = std::fscanf(get(), format, args...);
-    if (rval == EOF)
-      check(!error(), "fscanf");
+    auto rval = std::fscanf(_fp, format, args...);
+    if (rval == EOF && !eof() && error()) throw_error("fscanf");
     return rval;
   }
 
   enum class Seek { Set=SEEK_SET, Current=SEEK_CUR, End=SEEK_END };
 
   void seek(long offset, SeekEnum origin=Seek::Set) {
-    auto rval =std::fseek(get(), offset, int(origin));
-    check((rval == 0), "fseek");
+    auto rval = std::fseek(_fp, offset, int(origin));
+    if (rval != 0) TJG_FILE_POSIX_THROW("fseek");
   }
-
-  void setpos(const std::fpos_t& pos)
-  { check(std::fsetpos(get(), &pos) == 0, "fsetpos"); }
 
   long tell() const {
-    auto rval = std::ftell(get());
-    check((rval != -1L), "ftell");
+    auto rval = std::ftell(_fp);
+    if (rval == -1L) throw_errno("ftell");
     return rval;
   }
 
-private:
-  std::size_t write(const void* buf, std::size_t size, std::size_t count) {
+  std::fpos_t getpos() const {
+    auto result = std::fpos_t{};
+    auto rval = std::fgetpos(_fp, &result);
+    if (rval != 0) throw_errno("fgetpos");
+    return result;
+  }
+
+  void setpos(const std::fpos_t& pos) {
+    auto rval = std::fsetpos(_fp, &pos);
+    if (rval != 0) throw_errno("fsetpos");
+  }
+
+  std::size_t write(not_null<const void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return 0;
-    auto rval = std::fwrite(buf, size, count, get());
-    if (rval == 0)
-      check(!error(), "fwrite");
+    auto rval = std::fwrite(buf, size, count, _fp);
+    if (rval == 0) throw_error("fwrite");
     return rval;
   }
 
-public:
   template<TriviallyCopyable T>
   std::size_t write(std::span<T> buf)
   { return write(buf.data(), sizeof(T), buf.size()); }
 
-  void rewind() { std::rewind(get()); }
+  void rewind() noexcept { std::rewind(_fp); }
 
   enum class BufferMode { Full = _IOFBF, Line = _IOLBF, None = _IONBF };
 
-  using Buffer = std::array<char, BUFSIZE>;
+  using Buffer = std::array<char_t, BUFSIZE>;
 
-  void setbuf() { std::setbuf(get(), nullptr); }
+  void setbuf() noexcept { std::setbuf(_fp, nullptr); }
+
+private:
+  void setvbuf(char_t* buf, std::size_t size, BufferMode mode = BufferMode::Full) {
+    auto rval = std::setvbuf(_fp, buf, static_cast<int>(mode), size);
+    if (rval != 0) throw_error("setvbuf");
+  }
+
+public:
+  void setbuf(BufferMode mode) { setvbuf(nullptr, 0, mode); }
+
+  void setbuf(std::size_t size, BufferMode mode = BufferMode::Full)
+  { setvbuf(nullptr, size, mode); }
+
+  void setbuf(not_null<char_t*> buf, std::size_t size,
+              BufferMode mode = BufferMode::Full)
+  { setvbuf(buf, size, mode); }
 
   template<std::size_t N>
-  void setbuf(std::array<char, N>& buf, BufferMode mode = BufferMode::Full) {
-    auto rval = std::setvbuf(get(), buf.data(), int(mode), N);
-    check((rval == 0), "setvbuf");
-  }
+  void setbuf(std::array<char_t, N>& buf, BufferMode mode = BufferMode::Full)
+  { setvbuf(buf.data(), N, mode); }
 
-  void setbuf(BufferMode mode, std::size_t size) {
-    auto rval = std::setvbuf(get(), nullptr, mode, size);
-    check((rval == 0), "setvbuf");
-  }
-
-  bool ungetc(int ch) {
-    if (ch == EOF)
-      return false;
-    auto rval = std::ungetc(ch, get());
+  bool ungetc(char_t ch) noexcept {
+    auto rval = std::ungetc(IntChar(ch), _fp);
     return (rval != EOF);
   }
 
 }; // File
+
+inline void swap(File& lhs, File& rhs) noexcept { lhs.swap(rhs); }
 
 #endif
