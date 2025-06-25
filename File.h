@@ -1,4 +1,25 @@
+#ifndef TJG_FILE_H
+#define TJG_FILE_H
+#pragma once
+
+#include <gsl/gsl>
+
+#include <optional>
+#include <string>
+#include <array>
+#include <filesystem>
+#include <iostream>
+#include <print>
+#include <system_error>
+#include <exception>
+#include <utility>
+#include <type_traits>
+#include <cstdio>
+
 namespace tjg {
+
+template<typename T>
+concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
 
 template<typename... Args>
 [[noreturn]]
@@ -10,42 +31,38 @@ void LogTerminate(std::format_string<Args...> fmt, Args&&... args) noexcept {
 
 class File {
 public:
-  using path     = std::filesystem::path;
-  using optional = std::optional;
-
-  using not_null = gsl::not_null;
+  using path = std::filesystem::path;
+  template<typename T> using not_null = gsl::not_null<T>;
   using zstring  = gsl::zstring;
   using czstring = gsl::czstring;
+
   using str_rv   = not_null<zstring>;
   using str_arg  = not_null<czstring>;
 
   using char_t   = char;
   using traits_t = std::char_traits<char_t>;
-  using string_view = std::basic_string_view<char_t>;
-
-  inline constexpr auto EOF = traits_t::eof;
 
   class Error: public std::exception {
     const std::string _what;
   public:
-    czstring what() const override noexcept { return what_str.c_str(); }
+    czstring what() const noexcept override { return _what.c_str(); }
     explicit Error(const std::string& what_) : _what{what_} { }
   }; // Error
 
 private:
-  std:FILE* _fp = nullptr;
+  static constexpr auto Eof = traits_t::eof();
+
+  std::FILE* _fp = nullptr;
   path _name;
 
-  void reset() noexcept { _fp = nullptr; _name.clear(); }
-
   std::string error_string(const std::string& what) const
-  { return "File " + _name + ": " + what; }
+  { return "File " + _name.generic_string() + ": " + what; }
 
   [[noreturn]] void throw_error(const std::string& what) const
     { throw Error{error_string(what)}; }
 
   [[noreturn]] void throw_errno(const std::string& what) const {
-    auto err = std::error_code{errno, std::system_category{}};
+    auto err = std::error_code{errno, std::system_category()};
     throw std::system_error{err, error_string(what)};
   }
 
@@ -86,8 +103,7 @@ public:
     close();
     _name = std::move(name);
     _fp   = std::fopen(_name.c_str(), mode);
-    if (_fp == nullptr)
-      TJG_FILE_POSIX_THROW("fopen");
+    if (_fp == nullptr) TJG_FILE_POSIX_THROW("fopen");
   } // open
 
   File() noexcept = default;
@@ -106,11 +122,12 @@ public:
 
   File& operator=(File&& f) {
     if (&f == this)
-      return;
+      return *this;
     close();
     _fp   = f._fp;
     _name = std::move(f._name);
     f._fp = nullptr;
+    return *this;
   }
 
   void swap(File& f) noexcept {
@@ -123,32 +140,30 @@ public:
   bool error() const noexcept { return (std::ferror(_fp) != 0); }
   bool flush()       noexcept { return (std::fflush(_fp) == 0); }
 
-  opt_char getc() {
+  std::optional<char_t> getc() {
     auto ch = std::fgetc(_fp);
-    if (ch != EOF)
-      return opt_char{gsl::narrow<char_t>(ch)};
+    if (ch != Eof)
+      return std::optional<char_t>{gsl::narrow<char_t>(ch)};
     if (!eof()) throw_error("fgetc");
-    return opt_char{};
+    return std::optional<char_t>{};
   }
 
   void gets(not_null<zstring> s, int count) {
     Expects(count > 1);
-    auto rval = std::fgets(s, count);
-    if (rval == nullptr)
-      TJG_FILE_POSIX_THROW("fgets");
+    auto rval = std::fgets(s, count, _fp);
+    if (rval == nullptr) TJG_FILE_POSIX_THROW("fgets");
   }
 
   template<typename... Args>
   int printf(str_arg fmt, Args&&... args) {
-    int rval = std::fprintf(_fp, format, std::forward<Args>(args)...);
-    if (rval < 0)
-      TJG_FILE_POSIX_THROW("fprintf");
+    int rval = std::fprintf(_fp, fmt, std::forward<Args>(args)...);
+    if (rval < 0) TJG_FILE_POSIX_THROW("fprintf");
     return rval;
   }
 
   void putc(char_t ch) {
     auto rval = std::fputc(IntChar(ch), _fp);
-    if (rval == EOF) throw_error("fputc");
+    if (rval == Eof) throw_error("fputc");
   }
 
   void puts(not_null<zstring> s) {
@@ -156,7 +171,7 @@ public:
     if (rval < 0) throw_error("fputs");
   }
 
-  std::size_t read(void* buf, std::size_t size, std::size_t count) {
+  std::size_t read(not_null<void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return 0;
     std::size_t rval = std::fread(buf, size, count, _fp);
@@ -164,22 +179,19 @@ public:
     return rval;
   }
 
-  template<typename T>
-  concept TriviallyCopyable = std::is_trivially_copyable_v<T>;
-
   template<TriviallyCopyable T>
   std::size_t read(std::span<T> buf)
   { return read(buf.data(), sizeof(T), buf.size()); }
 
   int scanf(str_arg format, auto&... args) {
     auto rval = std::fscanf(_fp, format, args...);
-    if (rval == EOF && !eof() && error()) throw_error("fscanf");
+    if (rval == Eof && !eof() && error()) throw_error("fscanf");
     return rval;
   }
 
   enum class Seek { Set=SEEK_SET, Current=SEEK_CUR, End=SEEK_END };
 
-  void seek(long offset, SeekEnum origin=Seek::Set) {
+  void seek(long offset, Seek origin=Seek::Set) {
     auto rval = std::fseek(_fp, offset, int(origin));
     if (rval != 0) TJG_FILE_POSIX_THROW("fseek");
   }
@@ -202,7 +214,9 @@ public:
     if (rval != 0) throw_errno("fsetpos");
   }
 
-  std::size_t write(not_null<const void*> buf, std::size_t size, std::size_t count) {
+  std::size_t write(not_null<const void*> buf, std::size_t size,
+                    std::size_t count)
+  {
     if (size == 0 || count == 0)
       return 0;
     auto rval = std::fwrite(buf, size, count, _fp);
@@ -218,12 +232,12 @@ public:
 
   enum class BufferMode { Full = _IOFBF, Line = _IOLBF, None = _IONBF };
 
-  using Buffer = std::array<char_t, BUFSIZE>;
+  using Buffer = std::array<char_t, BUFSIZ>;
 
   void setbuf() noexcept { std::setbuf(_fp, nullptr); }
 
 private:
-  void setvbuf(char_t* buf, std::size_t size, BufferMode mode = BufferMode::Full) {
+  void setvbuf(char_t* buf, std::size_t size, BufferMode mode) {
     auto rval = std::setvbuf(_fp, buf, static_cast<int>(mode), size);
     if (rval != 0) throw_error("setvbuf");
   }
@@ -244,11 +258,13 @@ public:
 
   bool ungetc(char_t ch) noexcept {
     auto rval = std::ungetc(IntChar(ch), _fp);
-    return (rval != EOF);
+    return (rval != Eof);
   }
 
 }; // File
 
 inline void swap(File& lhs, File& rhs) noexcept { lhs.swap(rhs); }
+
+} // tjg
 
 #endif
