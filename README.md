@@ -1,0 +1,1 @@
+# Safe FILE* wrapper.
