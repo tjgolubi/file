@@ -11,7 +11,7 @@ GSL=$(APP)/GSL
 TARGET1=tjg$(DBGSFX).$E
 TARGETS=$(TARGET1)
 
-SRC1 := tjg.cpp 
+SRC1 := tjg.cpp File.cpp
 SOURCE := $(SRC1)
 
 SYSINCL:=$(addsuffix /include, $(SPDLOG) $(GSL))
