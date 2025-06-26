@@ -14,6 +14,8 @@ TARGETS=$(TARGET1)
 SRC1 := tjg.cpp File.cpp
 SOURCE := $(SRC1)
 
+SCOUR := dox/html
+
 SYSINCL:=$(addsuffix /include, $(SPDLOG) $(GSL))
 INCLUDE:=$(PROJDIR)
 
@@ -24,9 +26,15 @@ include $(SWDEV)/build.mk
 
 .ONESHELL:
 
-.PHONY: all clean scour
+.PHONY: all clean scour doxygen
 
-all: $(TARGETS)
+all: $(TARGETS) doxygen
 
 $(TARGET1): $(OBJ1) $(LIBS)
         $(LINK)
+
+dox/html: $(wildcard *.cpp *.h)
+	cd $(PROJDIR)/dox
+	doxygen
+
+doxygen: dox/html
