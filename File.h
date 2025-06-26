@@ -96,7 +96,7 @@ public:
       return;
     auto err = std::fclose(_fp);
     _fp = nullptr;
-    if (err == 0) throw_error("fclose");
+    if (err != 0) throw_error("fclose");
   }
 
   void open(path name, str_arg mode) {
