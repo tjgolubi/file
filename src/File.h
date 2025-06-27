@@ -61,11 +61,6 @@ public:
   using char_t   = char;
   using traits_t = std::char_traits<char_t>;
 
-  /// Exception thrown when `errno` is not set.
-  struct Error: public std::runtime_error {
-    explicit Error(const std::string& what_) : std::runtime_error{what_} { }
-  }; // Error
-
 private:
   /// Represents end-of-file.
   static constexpr auto Eof = traits_t::eof();
@@ -77,23 +72,19 @@ private:
   /// "File <name>: <what>".
   std::string error_string(str_arg what) const;
 
-  /// Throws an `Error` with a context message.
-  [[noreturn]] void throw_error(str_arg what) const
-    { throw Error{error_string(what)}; }
+  /// Throws a std::system_error with a context message.
+  [[noreturn]] void throw_error(std::errc ec, str_arg what) const {
+    throw std::system_error{std::make_error_code(ec), error_string(what)};
+  }
 
   /// Throws a std::system_error with a context message.
   [[noreturn]] void throw_errno(str_arg what) const {
-    auto err = std::error_code{errno, std::system_category()};
-    throw std::system_error{err, error_string(what)};
-  }
-
-  /// Throws either a std::system_error or an `Error`, with a context message.
-  [[noreturn]] void throw_posix(str_arg what) const {
-#ifdef _POSIX_VERSION
-    throw_errno(what);
-#else
-    throw_error(what);
-#endif
+    auto err = errno;
+    if (err != 0) {
+      auto ec = std::error_code{err, std::system_category()};
+      throw std::system_error{ec, error_string(what)};
+    }
+    throw_error(std::errc::io_error, what);
   }
 
   /// Convert a `char_t` to an `int`.
@@ -129,28 +120,37 @@ public:
   /// @brief Closes the file using std::fclose
   /// Does not clear the file name.
   /// @see https://en.cppreference.com/w/c/io/fclose
-  /// @throws Error
+  /// @throws std::system_error
   void close() {
     if (_fp == nullptr)
       return;
+    auto save = ResetErrno{};
     auto err = std::fclose(_fp);
     _fp = nullptr;
-    if (err != 0) throw_error("fclose");
+    if (err != 0) throw_errno("fclose");
   }
 
 private:
   /// Converts an std::ios_base::openmode to a C-style open mode string.
-  /// Throws `Error` if the `mode` is invalid.
+  /// Throws if the `mode` is invalid.
   /// @return A file open mode string.
-  /// @throw Error
+  /// @throw std::system_error
   static czstring ModeStr(std::ios_base::openmode mode);
+
+  class ResetErrno {
+    int _errno;
+  public:
+    ResetErrno() : _errno{errno} { errno = 0; }
+    ~ResetErrno() { errno = _errno; }
+  }; // ResetErrno
 
   /// Opens the file using std::fopen
   /// @see https://en.cppreference.com/w/c/io/fopen
-  /// @throws std::system_error or Error.
+  /// @throws std::system_error
   void open(str_arg mode) {
+    auto save = ResetErrno{};
     _fp = std::fopen(_name.c_str(), mode);
-    if (_fp == nullptr) throw_posix("fopen");
+    if (_fp == nullptr) throw_errno("fopen");
   } // open
 
 public:
@@ -163,19 +163,19 @@ public:
 
   /// Opens a file with a C-style open mode string.
   /// @see https://en.cppreference.com/w/c/io/fopen
-  /// @throws std::system_error or Error.
+  /// @throws std::system_error
   explicit File(std::filesystem::path name, str_arg mode)
     : _fp{}, _name{std::move(name)}
   { open(mode); }
 
   /// Opens a file with an `openmode` bitmask.
   /// @see https://en.cppreference.com/w/c/io/fopen
-  /// @throws std::system_error or Error.
+  /// @throws std::system_error
   explicit File(std::filesystem::path name, std::ios_base::openmode mode)
     : _fp{}, _name{std::move(name)}
   {
     auto str = ModeStr(mode);
-    if (!str) throw_error("invalid open mode");
+    if (!str) throw_error(std::errc::invalid_argument, "invalid open mode");
     open(str);
     if (mode & std::ios_base::ate)
       seek(0, Seek::End);
@@ -190,7 +190,7 @@ public:
   { f._fp = nullptr; }
 
   /// Transfer ownership
-  /// @throws Error
+  /// @throws std::system_error
   File& operator=(File&& f) {
     if (&f == this)
       return *this;
@@ -228,75 +228,125 @@ public:
 
   /// Reads a single character using std::fgetc
   /// @see https://en.cppreference.com/w/c/io/fgetc
-  /// @throws Error gsl::narrowing_error
+  /// @throws std::system_error, gsl::narrowing_error
   [[nodiscard]]
   std::optional<char_t> getc() {
+    auto save = ResetErrno{};
     auto ch = std::fgetc(_fp);
     if (ch != Eof)
       return std::optional<char_t>{gsl::narrow<char_t>(ch)};
-    if (!eof()) throw_error("fgetc");
+    if (!eof()) throw_errno("fgetc");
     return std::optional<char_t>{};
   }
 
+  /// Standard buffer with default optimal size for this platform.
+  template<std::size_t N=BUFSIZ>
+  using Buffer = std::array<char_t, N>;
+
   /// Reads a C-style string using std::fgets
+  ///
+  /// Reads at most `count-1` characters from the file stream and
+  /// stores them in the character array pointed to by `str`. Parsing stops
+  /// if a newline character is found, in which case `str` will contain that
+  /// newline character, or if end-of-file occurs. If bytes are read and
+  /// no errors occur, writes a null character at the position immediately
+  /// after the last character written to `str`.
+  ///
+  /// @param str    Pointer to an element of a char array
+  /// @param count  Maximum number of characters to read (typically the length of `str`) 
   /// @see https://en.cppreference.com/w/c/io/fgetc
   /// @requires count > 1.
-  /// @throws std::system_error or Error
-  void gets(not_null<zstring> s, int count) {
+  /// @return `true` if successful, `false` if end-of-file
+  /// @throws std::system_error
+  bool gets(not_null<zstring> str, int count) {
     Expects(count > 1);
-    auto rval = std::fgets(s, count, _fp);
-    if (rval == nullptr) throw_posix("fgets");
+    auto save = ResetErrno{};
+    auto rval = std::fgets(str, count, _fp);
+    if (rval != nullptr)
+      return true;
+    if (!eof()) throw_errno("fgets");
+    return false;
   }
+
+  /// Reads a C-style string into a std::array<char_t> using std::fgets
+  ///
+  /// Reads at most `str.size()-1` characters from the file stream and stores
+  /// them in the Buffer str. Parsing stops if a newline character is found,
+  /// in which case str will contain that newline character, or if end-of-file
+  /// occurs. If bytes are read and no errors occur, writes a null character
+  /// at the position immediately after the last character written to str.
+
+  /// If the end-of-file condition is encountered, sets the eof indicator on
+  /// the file stream (see eof()). This is only a failure if it causes no bytes
+  /// to be read, in which case an exception is thrown and the contents
+  /// of the array pointed to by str are not altered (i.e. the first byte is
+  /// not overwritten with a null character).
+  ///
+  /// If the failure has been caused by some other error, sets the error
+  /// indicator (see error()) of the stream and throws an exception.
+  /// The contents of the array pointed to by str are indeterminate (it may not
+  /// even be null-terminated).
+
+  /// @param str  An std::array<char_t>
+  /// @see https://en.cppreference.com/w/c/io/fgetc
+  /// @requires count > 1.
+  /// @throws std::system_error
+  template<std::size_t N=BUFSIZ>
+  bool gets(Buffer<N>& str) { return gets(str.data(), std::ssize(str)); }
 
   /// C-style formatted output using std::fprintf
   /// @see https://en.cppreference.com/w/c/io/fprintf
-  /// @throws std::system_error or Error
+  /// @throws std::system_error
   template<typename... Args>
   int printf(str_arg fmt, Args&&... args) {
+    auto save = ResetErrno{};
     int rval = std::fprintf(_fp, fmt, std::forward<Args>(args)...);
-    if (rval < 0) throw_posix("fprintf");
+    if (rval < 0) throw_errno("fprintf");
     return rval;
   }
 
   /// Writes a single character using std::fputc
   /// @see https://en.cppreference.com/w/c/io/fputc
-  /// @throws Error
+  /// @throws std::system_error
   void putc(char_t ch) {
+    auto save = ResetErrno{};
     auto rval = std::fputc(IntChar(ch), _fp);
-    if (rval == Eof) throw_error("fputc");
+    if (rval != ch) throw_errno("fputc");
   }
 
   /// Writes a C-style string using std::fputs
   /// @see https://en.cppreference.com/w/c/io/fputs
-  /// @throws Error
-  void puts(not_null<zstring> s) {
-    auto rval = std::fputs(s, _fp);
-    if (rval < 0) throw_error("fputs");
+  /// @throws std::system_error
+  void puts(not_null<czstring> str) {
+    auto save = ResetErrno{};
+    auto rval = std::fputs(str, _fp);
+    if (rval < 0) throw_errno("fputs");
   }
 
   /// @brief Reads a block of data using std::fread
   /// Returns the number of records successfully read, which might be less than
   /// `count` if at the end of the input file or an input error occurred.
-  /// Throws Error if nothing was read, but !eof() and error() == `true`.
+  /// Throws if nothing was read, but !eof().
   /// @see https://en.cppreference.com/w/c/io/fread
   /// @return The number of records successfully read
-  /// @throws Error
+  /// @throws std::system_error
   [[nodiscard]]
   std::size_t read(not_null<void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return 0;
+    auto save = ResetErrno{};
     std::size_t rval = std::fread(buf, size, count, _fp);
-    if (rval == 0 && !eof() && error()) throw_error("fread");
+    if (rval == 0 && !eof()) throw_errno("fread");
     return rval;
   }
 
   /// @brief Reads a std::span using std::fread
   /// Returns the number of items successfully read, which might be less than
   /// buf.size() if at the end of the input file or an input error occurred.
-  /// Throws `Error` if nothing was read, but `!eof() && error()`.
+  /// Throws if nothing was read, but !eof()
   /// @see https://en.cppreference.com/w/c/io/fread
   /// @return The number of items successfully read
-  /// @throws Error
+  /// @throws std::system_error
   template<TriviallyCopyable T>
   [[nodiscard]] std::size_t read(std::span<T> buf)
   { return read(buf.data(), sizeof(T), buf.size()); }
@@ -304,27 +354,29 @@ public:
   /// C-style formatted input using std::fscanf
   /// @see https://en.cppreference.com/w/c/io/fscanf
   /// @return The number of items succesfully parsed and stored.
-  /// @throw Error
+  /// @throw std::system_error
   [[nodiscard]]
   int scanf(str_arg format, auto&... args) {
+    auto save = ResetErrno{};
     auto rval = std::fscanf(_fp, format, args...);
-    if (rval == Eof && !eof() && error()) throw_error("fscanf");
+    if (rval < 0 && !(rval == Eof && eof())) throw_errno("fscanf");
     return rval;
   }
 
   /// Origin for seek().
   enum class Seek {
-    Set=SEEK_SET,     /// Relative the beginning of the file
-    Current=SEEK_CUR, /// Relative to the current file position
-    End=SEEK_END      /// Relative to the end of the file
+    Set     = SEEK_SET, /// Relative the beginning of the file
+    Current = SEEK_CUR, /// Relative to the current file position
+    End     = SEEK_END  /// Relative to the end of the file
   };
 
   /// Seeks to a given position using std::fseek
   /// @see https://en.cppreference.com/w/c/io/fseek
-  /// @throw std::system_error or Error
+  /// @throw std::system_error
   void seek(long offset, Seek origin=Seek::Set) {
+    auto save = ResetErrno{};
     auto rval = std::fseek(_fp, offset, int(origin));
-    if (rval != 0) throw_posix("fseek");
+    if (rval != 0) throw_errno("fseek");
   }
 
   /// Returns the file position using std::ftell
@@ -360,19 +412,20 @@ public:
 
   /// Writes a block of data using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
-  /// Throws `Error` if the number of records written is less than `count`.
-  /// @throw Error
+  /// Throws if the number of records written is not `count`.
+  /// @throw std::system_error
   void write(not_null<const void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return;
+    auto save = ResetErrno{};
     auto rval = std::fwrite(buf, size, count, _fp);
-    if (rval != count) throw_error("fwrite");
+    if (rval != count) throw_errno("fwrite");
   }
 
   /// Writes a std::span using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
-  /// Throws `Error` if the number of records written is less than `buf.size()`.
-  /// @throw Error
+  /// Throws if the number of records written is less than `buf.size()`.
+  /// @throw std::system_error
   template<TriviallyCopyable T>
   void write(std::span<T> buf)
   { return write(buf.data(), sizeof(T), buf.size()); }
@@ -384,12 +437,9 @@ public:
   /// Buffering mode for the file stream.
   enum class BufferMode {
     Full = _IOFBF,  /// Read/write the buffer on underflow/overflow
-    Line = _IOLBF,  /// Read/write lines (until '\n')
+    Line = _IOLBF,  /// Read/write lines (until newline)
     None = _IONBF   /// Unbuffered
   };
-
-  /// Standard buffer of optimal size for this platform.
-  using Buffer = std::array<char_t, BUFSIZ>;
 
   /// Disables buffering using std::setbuf
   /// @see https://en.cppreference.com/w/c/io/setbuf
@@ -398,34 +448,35 @@ public:
 private:
   /// Sets buffering mode using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
-  /// @throw Error
+  /// @throw std::system_error
   void setvbuf(char_t* buf, std::size_t size, BufferMode mode) {
+    auto save = ResetErrno{};
     auto rval = std::setvbuf(_fp, buf, static_cast<int>(mode), size);
-    if (rval != 0) throw_error("setvbuf");
+    if (rval != 0) throw_errno("setvbuf");
   }
 
 public:
   /// Sets buffering mode using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
-  /// @throw Error
+  /// @throw std::system_error
   void setbuf(BufferMode mode) { setvbuf(nullptr, 0, mode); }
 
   /// Sets buffer size and mode using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
-  /// @throw Error
+  /// @throw std::system_error
   void setbuf(std::size_t size, BufferMode mode = BufferMode::Full)
   { setvbuf(nullptr, size, mode); }
 
   /// Sets buffer using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
-  /// @throw Error
+  /// @throw std::system_error
   void setbuf(not_null<char_t*> buf, std::size_t size,
               BufferMode mode = BufferMode::Full)
   { setvbuf(buf, size, mode); }
 
   /// Sets buffer using std::array and std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
-  /// @throw Error
+  /// @throw std::system_error
   template<std::size_t N>
   void setbuf(std::array<char_t, N>& buf, BufferMode mode = BufferMode::Full)
   { setvbuf(buf.data(), N, mode); }
