@@ -1,5 +1,19 @@
-#ifndef TJG_FILE_H
-#define TJG_FILE_H
+/// @file File.h
+/// @brief Safe std::FILE* wrapper with exception-based error handling.
+///
+/// This header defines the `tjg::File` class, a thin RAII-style wrapper
+/// around a `std::FILE*` that supports exception-based error reporting,
+/// filename retention, and safe destructor behavior. It includes helpers
+/// for mode string conversion, error formatting, and line-based reading.
+///
+/// @author Terry Golubiewski
+/// @date 2025
+/// @copyright
+///   Copyright 2025 Terry Golubiewski. All rights reserved.
+///   Distributed under the MIT License.
+///
+/// @see File.cpp for implementation details.
+
 #pragma once
 
 #include <gsl/gsl>
@@ -47,30 +61,33 @@ public:
   using char_t   = char;
   using traits_t = std::char_traits<char_t>;
 
-  /// Exception thrown when error is not set.
-  class Error: public std::exception {
-    const std::string _what;
-  public:
-    czstring what() const noexcept override { return _what.c_str(); }
-    explicit Error(const std::string& what_) : _what{what_} { }
+  /// Exception thrown when `errno` is not set.
+  struct Error: public std::runtime_error {
+    explicit Error(const std::string& what_) : std::runtime_error{what_} { }
   }; // Error
 
 private:
+  /// Represents end-of-file.
   static constexpr auto Eof = traits_t::eof();
 
-  std::FILE* _fp = nullptr;
-  path _name;
+  std::FILE* _fp = nullptr;  /// Wrapped pointer.
+  path _name;                /// File name or user-defined label.
 
+  /// Generates an string for an exception "what" message of the form:
+  /// "File <name>: <what>".
   std::string error_string(str_arg what) const;
 
+  /// Throws an `Error` with a context message.
   [[noreturn]] void throw_error(str_arg what) const
     { throw Error{error_string(what)}; }
 
+  /// Throws a std::system_error with a context message.
   [[noreturn]] void throw_errno(str_arg what) const {
     auto err = std::error_code{errno, std::system_category()};
     throw std::system_error{err, error_string(what)};
   }
 
+  /// Throws either a std::system_error or an `Error`, with a context message.
   [[noreturn]] void throw_posix(str_arg what) const {
 #ifdef _POSIX_VERSION
     throw_errno(what);
@@ -79,11 +96,12 @@ private:
 #endif
   }
 
+  /// Convert a `char_t` to an `int`.
   static inline constexpr int IntChar(char_t c)
     { return static_cast<int>(static_cast<unsigned char>(c)); }
 
 public:
-  // Only these 4 member functions are valid after calling close().
+  // Only the next four member functions are valid after calling close().
 
   /// Implicitly returns the owned FILE*.
   operator std::FILE*() noexcept { return _fp; }
@@ -108,8 +126,10 @@ public:
                                                    rval, std::strerror(errno));
   }
 
-  /// Closes the file using std::fclose
+  /// @brief Closes the file using std::fclose
+  /// Does not clear the file name.
   /// @see https://en.cppreference.com/w/c/io/fclose
+  /// @throws Error
   void close() {
     if (_fp == nullptr)
       return;
@@ -119,10 +139,15 @@ public:
   }
 
 private:
+  /// Converts an std::ios_base::openmode to a C-style open mode string.
+  /// Throws `Error` if the `mode` is invalid.
+  /// @return A file open mode string.
+  /// @throw Error
   static czstring ModeStr(std::ios_base::openmode mode);
 
   /// Opens the file using std::fopen
   /// @see https://en.cppreference.com/w/c/io/fopen
+  /// @throws std::system_error or Error.
   void open(str_arg mode) {
     _fp = std::fopen(_name.c_str(), mode);
     if (_fp == nullptr) throw_posix("fopen");
@@ -136,12 +161,16 @@ public:
   explicit File(not_null<FILE*> fp_, path name_=path{}) noexcept
     : _fp(fp_), _name(std::move(name_)) { }
 
-  /// Opens a file
+  /// Opens a file with a C-style open mode string.
+  /// @see https://en.cppreference.com/w/c/io/fopen
+  /// @throws std::system_error or Error.
   explicit File(std::filesystem::path name, str_arg mode)
     : _fp{}, _name{std::move(name)}
   { open(mode); }
 
-  /// Opens a file
+  /// Opens a file with an `openmode` bitmask.
+  /// @see https://en.cppreference.com/w/c/io/fopen
+  /// @throws std::system_error or Error.
   explicit File(std::filesystem::path name, std::ios_base::openmode mode)
     : _fp{}, _name{std::move(name)}
   {
@@ -161,6 +190,7 @@ public:
   { f._fp = nullptr; }
 
   /// Transfer ownership
+  /// @throws Error
   File& operator=(File&& f) {
     if (&f == this)
       return *this;
@@ -177,7 +207,7 @@ public:
     std::swap(_name, f._name);
   }
 
-  /// Clears a file stream's error state using std::clearerr
+  /// Resets the error flags and the end-of-file indicator.
   /// @see https://en.cppreference.com/w/c/io/clearerr
   void clearerr()    noexcept { std::clearerr(_fp); }
 
@@ -198,6 +228,7 @@ public:
 
   /// Reads a single character using std::fgetc
   /// @see https://en.cppreference.com/w/c/io/fgetc
+  /// @throws Error gsl::narrowing_error
   [[nodiscard]]
   std::optional<char_t> getc() {
     auto ch = std::fgetc(_fp);
@@ -209,6 +240,8 @@ public:
 
   /// Reads a C-style string using std::fgets
   /// @see https://en.cppreference.com/w/c/io/fgetc
+  /// @requires count > 1.
+  /// @throws std::system_error or Error
   void gets(not_null<zstring> s, int count) {
     Expects(count > 1);
     auto rval = std::fgets(s, count, _fp);
@@ -217,6 +250,7 @@ public:
 
   /// C-style formatted output using std::fprintf
   /// @see https://en.cppreference.com/w/c/io/fprintf
+  /// @throws std::system_error or Error
   template<typename... Args>
   int printf(str_arg fmt, Args&&... args) {
     int rval = std::fprintf(_fp, fmt, std::forward<Args>(args)...);
@@ -226,6 +260,7 @@ public:
 
   /// Writes a single character using std::fputc
   /// @see https://en.cppreference.com/w/c/io/fputc
+  /// @throws Error
   void putc(char_t ch) {
     auto rval = std::fputc(IntChar(ch), _fp);
     if (rval == Eof) throw_error("fputc");
@@ -233,13 +268,19 @@ public:
 
   /// Writes a C-style string using std::fputs
   /// @see https://en.cppreference.com/w/c/io/fputs
+  /// @throws Error
   void puts(not_null<zstring> s) {
     auto rval = std::fputs(s, _fp);
     if (rval < 0) throw_error("fputs");
   }
 
-  /// Reads a block of data using std::fread
+  /// @brief Reads a block of data using std::fread
+  /// Returns the number of records successfully read, which might be less than
+  /// `count` if at the end of the input file or an input error occurred.
+  /// Throws Error if nothing was read, but !eof() and error() == `true`.
   /// @see https://en.cppreference.com/w/c/io/fread
+  /// @return The number of records successfully read
+  /// @throws Error
   [[nodiscard]]
   std::size_t read(not_null<void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
@@ -249,14 +290,21 @@ public:
     return rval;
   }
 
-  /// Reads a std::span using std::fread
+  /// @brief Reads a std::span using std::fread
+  /// Returns the number of items successfully read, which might be less than
+  /// buf.size() if at the end of the input file or an input error occurred.
+  /// Throws `Error` if nothing was read, but `!eof() && error()`.
   /// @see https://en.cppreference.com/w/c/io/fread
+  /// @return The number of items successfully read
+  /// @throws Error
   template<TriviallyCopyable T>
   [[nodiscard]] std::size_t read(std::span<T> buf)
   { return read(buf.data(), sizeof(T), buf.size()); }
 
   /// C-style formatted input using std::fscanf
   /// @see https://en.cppreference.com/w/c/io/fscanf
+  /// @return The number of items succesfully parsed and stored.
+  /// @throw Error
   [[nodiscard]]
   int scanf(str_arg format, auto&... args) {
     auto rval = std::fscanf(_fp, format, args...);
@@ -264,10 +312,16 @@ public:
     return rval;
   }
 
-  enum class Seek { Set=SEEK_SET, Current=SEEK_CUR, End=SEEK_END };
+  /// Origin for seek().
+  enum class Seek {
+    Set=SEEK_SET,     /// Relative the beginning of the file
+    Current=SEEK_CUR, /// Relative to the current file position
+    End=SEEK_END      /// Relative to the end of the file
+  };
 
   /// Seeks to a given position using std::fseek
   /// @see https://en.cppreference.com/w/c/io/fseek
+  /// @throw std::system_error or Error
   void seek(long offset, Seek origin=Seek::Set) {
     auto rval = std::fseek(_fp, offset, int(origin));
     if (rval != 0) throw_posix("fseek");
@@ -275,6 +329,8 @@ public:
 
   /// Returns the file position using std::ftell
   /// @see https://en.cppreference.com/w/c/io/ftell
+  /// @return Current file position.
+  /// @throw std::system_error
   [[nodiscard]]
   long tell() const {
     auto rval = std::ftell(_fp);
@@ -284,6 +340,8 @@ public:
 
   /// Returns the file position using std::fgetpos
   /// @see https://en.cppreference.com/w/c/io/fgetpos
+  /// @return Current file position.
+  /// @throw std::system_error
   [[nodiscard]]
   std::fpos_t getpos() const {
     auto result = std::fpos_t{};
@@ -294,6 +352,7 @@ public:
 
   /// Sets the file position using std::fsetpos
   /// @see https://en.cppreference.com/w/c/io/getpos
+  /// @throw std::system_error
   void setpos(const std::fpos_t& pos) {
     auto rval = std::fsetpos(_fp, &pos);
     if (rval != 0) throw_errno("fsetpos");
@@ -301,6 +360,8 @@ public:
 
   /// Writes a block of data using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
+  /// Throws `Error` if the number of records written is less than `count`.
+  /// @throw Error
   void write(not_null<const void*> buf, std::size_t size, std::size_t count) {
     if (size == 0 || count == 0)
       return;
@@ -310,6 +371,8 @@ public:
 
   /// Writes a std::span using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
+  /// Throws `Error` if the number of records written is less than `buf.size()`.
+  /// @throw Error
   template<TriviallyCopyable T>
   void write(std::span<T> buf)
   { return write(buf.data(), sizeof(T), buf.size()); }
@@ -318,8 +381,14 @@ public:
   /// @see https://en.cppreference.com/w/c/io/rewind
   void rewind() noexcept { std::rewind(_fp); }
 
-  enum class BufferMode { Full = _IOFBF, Line = _IOLBF, None = _IONBF };
+  /// Buffering mode for the file stream.
+  enum class BufferMode {
+    Full = _IOFBF,  /// Read/write the buffer on underflow/overflow
+    Line = _IOLBF,  /// Read/write lines (until '\n')
+    None = _IONBF   /// Unbuffered
+  };
 
+  /// Standard buffer of optimal size for this platform.
   using Buffer = std::array<char_t, BUFSIZ>;
 
   /// Disables buffering using std::setbuf
@@ -327,6 +396,9 @@ public:
   void setbuf() noexcept { std::setbuf(_fp, nullptr); }
 
 private:
+  /// Sets buffering mode using std::setvbuf
+  /// @see https://en.cppreference.com/w/c/io/setvbuf
+  /// @throw Error
   void setvbuf(char_t* buf, std::size_t size, BufferMode mode) {
     auto rval = std::setvbuf(_fp, buf, static_cast<int>(mode), size);
     if (rval != 0) throw_error("setvbuf");
@@ -335,27 +407,32 @@ private:
 public:
   /// Sets buffering mode using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
+  /// @throw Error
   void setbuf(BufferMode mode) { setvbuf(nullptr, 0, mode); }
 
   /// Sets buffer size and mode using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
+  /// @throw Error
   void setbuf(std::size_t size, BufferMode mode = BufferMode::Full)
   { setvbuf(nullptr, size, mode); }
 
   /// Sets buffer using std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
+  /// @throw Error
   void setbuf(not_null<char_t*> buf, std::size_t size,
               BufferMode mode = BufferMode::Full)
   { setvbuf(buf, size, mode); }
 
   /// Sets buffer using std::array and std::setvbuf
   /// @see https://en.cppreference.com/w/c/io/setvbuf
+  /// @throw Error
   template<std::size_t N>
   void setbuf(std::array<char_t, N>& buf, BufferMode mode = BufferMode::Full)
   { setvbuf(buf.data(), N, mode); }
 
   /// Pushes a character back using std::ungetc
   /// @see https://en.cppreference.com/w/c/io/ungetc
+  /// @return `true` if successful; otherwise `false`
   [[nodiscard]]
   bool ungetc(char_t ch) noexcept {
     auto rval = std::ungetc(IntChar(ch), _fp);
@@ -364,8 +441,7 @@ public:
 
 }; // File
 
+/// Swap File
 inline void swap(File& lhs, File& rhs) noexcept { lhs.swap(rhs); }
 
 } // tjg
-
-#endif

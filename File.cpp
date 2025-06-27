@@ -1,3 +1,17 @@
+/// @file File.cpp
+/// @brief Implementation of the `tjg::File` class.
+///
+/// This source file provides the implementation of selected member
+/// functions declared in File.h, including `error_string()` and
+/// `ModeStr()`, which support detailed exception reporting and
+/// translation of C++ stream modes to C-style fopen modes.
+///
+/// @see File.h for class definition and documentation.
+/// @date 2025
+/// @copyright
+///   Copyright 2025 Terry Golubiewski. All rights reserved.
+///   Distributed under the MIT License.
+
 #include "File.h"
 
 namespace tjg {
