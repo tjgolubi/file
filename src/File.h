@@ -223,8 +223,11 @@ public:
 
   /// Flushes the file stream buffer using std::fflush
   /// @see https://en.cppreference.com/w/c/io/fflush
-  [[nodiscard]]
-  bool flush()       noexcept { return (std::fflush(_fp) == 0); }
+  /// @throws std::system_error
+  void flush() noexcept {
+    auto save = ResetErrno{};
+    if (std::fflush(_fp) != 0) throw_errno("fflush");
+  }
 
   /// Reads a single character using std::fgetc
   /// @see https://en.cppreference.com/w/c/io/fgetc
@@ -340,15 +343,15 @@ public:
     return rval;
   }
 
-  /// @brief Reads a std::span using std::fread
+  /// @brief Reads a std::array using std::fread
   /// Returns the number of items successfully read, which might be less than
   /// buf.size() if at the end of the input file or an input error occurred.
   /// Throws if nothing was read, but !eof()
   /// @see https://en.cppreference.com/w/c/io/fread
   /// @return The number of items successfully read
   /// @throws std::system_error
-  template<TriviallyCopyable T>
-  [[nodiscard]] std::size_t read(std::span<T> buf)
+  template<TriviallyCopyable T, std::size_t N>
+  [[nodiscard]] std::size_t read(std::array<T, N>& buf)
   { return read(buf.data(), sizeof(T), buf.size()); }
 
   /// C-style formatted input using std::fscanf
@@ -422,13 +425,21 @@ public:
     if (rval != count) throw_errno("fwrite");
   }
 
-  /// Writes a std::span using std::fwrite
+  /// Writes a std::array using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
   /// Throws if the number of records written is less than `buf.size()`.
   /// @throw std::system_error
-  template<TriviallyCopyable T>
-  void write(std::span<T> buf)
+  template<TriviallyCopyable T, std::size_t N>
+  void write(const std::array<T, N>& buf)
   { return write(buf.data(), sizeof(T), buf.size()); }
+
+  /// Writes a std::basic_string using std::fwrite
+  /// @see https://en.cppreference.com/w/c/io/fwrite
+  /// Throws if the number of characters written is less than `buf.size()`.
+  /// @throw std::system_error
+  template<typename Ch, typename Tr=std::char_traits<Ch>>
+  void write(const std::basic_string<Ch, Tr>& buf)
+  { return write(buf.data(), sizeof(Ch), buf.size()); }
 
   /// Rewinds the file to the beginning using std::rewind
   /// @see https://en.cppreference.com/w/c/io/rewind
