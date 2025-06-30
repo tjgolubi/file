@@ -54,13 +54,13 @@ class FileTest : public ::testing::Test {
 }; // FileTest
 
 const std::vector<std::string> FileTest::ThreeLineVec{
-  "line 1\n"s,
-  "line 2\n"s,
-  "line 3\n"s
+  "Line1\n"s,
+  "Line2\n"s,
+  "Line3\n"s
 };
 
 const std::array<char, 22> FileTest::ThreeLineStr = {
-  "line 1\nline 2\nline 3\n"
+  "Line1\nLine2\nLine3\n"
 };
 
 const std::array<FileTest::Buffer, 3> FileTest::ThreeLineBuf  = {
@@ -154,11 +154,61 @@ TEST_F(FileTest, MoveAssignmentTransfersOwnership) {
   EXPECT_TRUE(f3.is_open());
 } // MoveAssignmentTransfersOwnership
 
-#if 0
 TEST_F(FileTest, SeekAndTell) {
-  File f1{tmpfile_path, std::ios_base::in | std::ios_base::out};
-  EXPECT_TRUE(f1.is_open());
-  f1.write
+  File f{tmpfile_path,
+         std::ios_base::in | std::ios_base::out | std::ios_base::trunc};
+  EXPECT_TRUE(f.is_open());
+  f.write(ThreeLineBuf);
+  const long totalSize = sizeof(ThreeLineBuf);
+  EXPECT_EQ(totalSize, f.tell());
+  const long recSize = sizeof(Buffer);
+  {
+    f.rewind();
+    File::Buffer buf;
+    buf.fill('\0');
+    auto len = f.read(buf);
+    EXPECT_TRUE(f.eof());
+    EXPECT_FALSE(f.error());
+    EXPECT_EQ(len, sizeof(ThreeLineBuf));
+    EXPECT_STREQ(buf.data(), ThreeLineStr.data());
+  }
+  f.seek(-recSize, File::Seek::Current);
+  EXPECT_EQ(totalSize-recSize, f.tell());
+  EXPECT_FALSE(f.eof());
+  FileTest::Buffer buf;
+  buf.fill('\0');
+  {
+    static const gsl::czstring exp = "Line3";
+    EXPECT_TRUE(f.gets(buf));
+    EXPECT_STREQ(buf.data(), exp);
+  }
+  f.seek(recSize, File::Seek::Set);
+  EXPECT_EQ(recSize, f.tell());
+  {
+    std::array<Buffer, 3> buf;
+    for (auto& b : buf)
+      b.fill('\0');
+    static const std::array<Buffer, 3> exp  = {
+      Buffer{ 'L', 'i', 'n', 'e', '2', '\n' },
+      Buffer{ 'L', 'i', 'n', 'e', '3', '\n' }
+    };
+
+    EXPECT_EQ(2, f.read(buf));
+    EXPECT_TRUE(f.eof());
+    EXPECT_EQ(buf, exp);
+  }
+  auto pos = std::fpos_t{};
+  {
+    buf.fill('\0');
+    f.seek(-recSize, File::Seek::End);
+    EXPECT_EQ(2 * recSize, f.tell());
+    pos = f.getpos();
+    auto len = f.read(buf);
+    EXPECT_EQ(recSize, len);
+    static const gsl::czstring exp = "Line3\n";
+    EXPECT_STREQ(buf.data(), exp);
+    f.setpos(pos);
+    EXPECT_EQ(2 * recSize, f.tell());
+  }
 } // SeekAndTell
-#endif
 

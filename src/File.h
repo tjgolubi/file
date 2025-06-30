@@ -20,7 +20,9 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 #include <array>
+#include <span>
 #include <filesystem>
 #include <iostream>
 #include <print>
@@ -246,6 +248,10 @@ public:
   template<std::size_t N=BUFSIZ>
   using Buffer = std::array<char_t, N>;
 
+  /// Standard buffer with default optimal size for this platform.
+  template<std::size_t N=BUFSIZ>
+  using ConstBuffer = std::array<const char_t, N>;
+
   /// Reads a C-style string using std::fgets
   ///
   /// Reads at most `count-1` characters from the file stream and
@@ -293,6 +299,7 @@ public:
   /// @param str  An std::array<char_t>
   /// @see https://en.cppreference.com/w/c/io/fgetc
   /// @requires count > 1.
+  /// @return `true` if successful, `false` if end-of-file
   /// @throws std::system_error
   template<std::size_t N=BUFSIZ>
   bool gets(Buffer<N>& str) { return gets(str.data(), std::ssize(str)); }
@@ -343,6 +350,17 @@ public:
     return rval;
   }
 
+  /// @brief Reads a std::span using std::fread
+  /// Returns the number of items successfully read, which might be less than
+  /// buf.size() if at the end of the input file or an input error occurred.
+  /// Throws if nothing was read, but !eof()
+  /// @see https://en.cppreference.com/w/c/io/fread
+  /// @return The number of items successfully read
+  /// @throws std::system_error
+  template<TriviallyCopyable T, std::size_t N=std::dynamic_extent>
+  [[nodiscard]] std::size_t read(std::span<T, N> buf)
+  { return read(std::data(buf), sizeof(T), std::size(buf)); }
+
   /// @brief Reads a std::array using std::fread
   /// Returns the number of items successfully read, which might be less than
   /// buf.size() if at the end of the input file or an input error occurred.
@@ -352,7 +370,7 @@ public:
   /// @throws std::system_error
   template<TriviallyCopyable T, std::size_t N>
   [[nodiscard]] std::size_t read(std::array<T, N>& buf)
-  { return read(buf.data(), sizeof(T), buf.size()); }
+  { return read(std::data(buf), sizeof(T), std::size(buf)); }
 
   /// C-style formatted input using std::fscanf
   /// @see https://en.cppreference.com/w/c/io/fscanf
@@ -368,9 +386,9 @@ public:
 
   /// Origin for seek().
   enum class Seek {
-    Set     = SEEK_SET, /// Relative the beginning of the file
-    Current = SEEK_CUR, /// Relative to the current file position
-    End     = SEEK_END  /// Relative to the end of the file
+    Set     = SEEK_SET, ///< Relative the beginning of the file
+    Current = SEEK_CUR, ///< Relative to the current file position
+    End     = SEEK_END  ///< Relative to the end of the file
   };
 
   /// Seeks to a given position using std::fseek
@@ -425,13 +443,30 @@ public:
     if (rval != count) throw_errno("fwrite");
   }
 
+  /// Writes a std::span  using std::fwrite
+  /// @see https://en.cppreference.com/w/c/io/fwrite
+  /// Throws if the number of records written is less than `buf.size()`.
+  /// @throw std::system_error
+  // template<TriviallyCopyable T, std::size_t N=std::dynamic_extent>
+  template<TriviallyCopyable T, std::size_t N=std::dynamic_extent>
+  void write(std::span<T, N> buf)
+  { write(std::data(buf), sizeof(T), std::size(buf)); }
+
   /// Writes a std::array using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
   /// Throws if the number of records written is less than `buf.size()`.
   /// @throw std::system_error
   template<TriviallyCopyable T, std::size_t N>
   void write(const std::array<T, N>& buf)
-  { return write(buf.data(), sizeof(T), buf.size()); }
+  { write(std::data(buf), sizeof(T), std::size(buf)); }
+
+  /// Writes a std::vector using std::fwrite
+  /// @see https://en.cppreference.com/w/c/io/fwrite
+  /// Throws if the number of records written is less than `buf.size()`.
+  /// @throw std::system_error
+  template<TriviallyCopyable T>
+  void write(const std::vector<T>& buf)
+  { write(std::data(buf), sizeof(T), std::size(buf)); }
 
   /// Writes a std::basic_string using std::fwrite
   /// @see https://en.cppreference.com/w/c/io/fwrite
@@ -439,7 +474,7 @@ public:
   /// @throw std::system_error
   template<typename Ch, typename Tr=std::char_traits<Ch>>
   void write(const std::basic_string<Ch, Tr>& buf)
-  { return write(buf.data(), sizeof(Ch), buf.size()); }
+  { write(std::data(buf), sizeof(Ch), std::size(buf)); }
 
   /// Rewinds the file to the beginning using std::rewind
   /// @see https://en.cppreference.com/w/c/io/rewind
@@ -447,9 +482,9 @@ public:
 
   /// Buffering mode for the file stream.
   enum class BufferMode {
-    Full = _IOFBF,  /// Read/write the buffer on underflow/overflow
-    Line = _IOLBF,  /// Read/write lines (until newline)
-    None = _IONBF   /// Unbuffered
+    Full = _IOFBF,  ///< Read/write the buffer on underflow/overflow
+    Line = _IOLBF,  ///< Read/write lines (until newline)
+    None = _IONBF   ///< Unbuffered
   };
 
   /// Disables buffering using std::setbuf
