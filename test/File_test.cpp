@@ -30,8 +30,9 @@ class FileTest : public ::testing::Test {
   using Buffer = File::Buffer<6>;
 
   static const std::vector<std::string> ThreeLineVec;
-  static const std::array<char, 22> ThreeLineStr;
+  static const std::array<char, 18> ThreeLineArr;
   static const std::array<Buffer, 3> ThreeLineBuf;
+  static const gsl::czstring ThreeLineStr;
 
   static const gsl::czstring HelloWorld;
 
@@ -41,7 +42,7 @@ class FileTest : public ::testing::Test {
     tmpfile_path = fs::temp_directory_path() / "gtest_tempfile.txt";
     auto f = std::fopen(tmpfile_path.string().c_str(), "w");
     if (!!f) {
-      std::fputs(ThreeLineStr.data(), f);
+      std::fputs(ThreeLineStr, f);
       std::fclose(f);
     }
   }
@@ -59,9 +60,7 @@ const std::vector<std::string> FileTest::ThreeLineVec{
   "Line3\n"s
 };
 
-const std::array<char, 22> FileTest::ThreeLineStr = {
-  "Line1\nLine2\nLine3\n"
-};
+const gsl::czstring FileTest::ThreeLineStr = "Line1\nLine2\nLine3\n";
 
 const std::array<FileTest::Buffer, 3> FileTest::ThreeLineBuf  = {
   Buffer{ 'L', 'i', 'n', 'e', '1', '\n' },
@@ -69,13 +68,25 @@ const std::array<FileTest::Buffer, 3> FileTest::ThreeLineBuf  = {
   Buffer{ 'L', 'i', 'n', 'e', '3', '\n' }
 };
 
+const std::array<char, 18> FileTest::ThreeLineArr = {
+   'L', 'i', 'n', 'e', '1', '\n',
+   'L', 'i', 'n', 'e', '2', '\n',
+   'L', 'i', 'n', 'e', '3', '\n'
+};
+
 const gsl::czstring FileTest::HelloWorld = "Hello, world!\n";
 
 TEST_F(FileTest, OpenClose) {
+  std::FILE* fp = nullptr;
   auto f = File{tmpfile_path, std::ios_base::in};
   EXPECT_TRUE(f.is_open());
+  fp = f;
+  EXPECT_NE(fp, nullptr);
   f.close();
   EXPECT_FALSE(f.is_open());
+  EXPECT_EQ(f.name(), tmpfile_path);
+  fp = f;
+  EXPECT_EQ(fp, nullptr);
 } // OpenClose
 
 TEST_F(FileTest, ReadLinesUsingGets) {
@@ -170,7 +181,7 @@ TEST_F(FileTest, SeekAndTell) {
     EXPECT_TRUE(f.eof());
     EXPECT_FALSE(f.error());
     EXPECT_EQ(len, sizeof(ThreeLineBuf));
-    EXPECT_STREQ(buf.data(), ThreeLineStr.data());
+    EXPECT_STREQ(buf.data(), ThreeLineStr);
   }
   f.seek(-recSize, File::Seek::Current);
   EXPECT_EQ(totalSize-recSize, f.tell());
@@ -212,3 +223,39 @@ TEST_F(FileTest, SeekAndTell) {
   }
 } // SeekAndTell
 
+TEST_F(FileTest, CharInputOutput) {
+  {
+    File f{tmpfile_path, std::ios_base::in};
+    const char c = 'X';
+    EXPECT_THROW({f.putc(c);}, std::system_error);
+    EXPECT_TRUE(f.error());
+  }
+  {
+    File f{tmpfile_path, std::ios_base::out};
+    for (const auto c : ThreeLineArr)
+      f.putc(c);
+    f.rewind();
+    EXPECT_EQ(f.tell(), 0L);
+    EXPECT_THROW({ (void) f.getc(); }, std::system_error);
+    EXPECT_TRUE(f.error());
+    f.clearerr();
+    EXPECT_FALSE(f.error());
+  }
+  {
+    std::optional<char> c;
+    File f{tmpfile_path, std::ios_base::in};
+    std::string s;
+    while ((c = f.getc())) {
+      EXPECT_NE(*c, '\0');
+      s.push_back(*c);
+    }
+    EXPECT_TRUE(f.eof());
+    EXPECT_FALSE(f.error());
+    auto exp = std::string{ThreeLineStr};
+    EXPECT_EQ(s, std::string{ThreeLineStr});
+    const char x = 'X';
+    EXPECT_TRUE(f.ungetc(x));
+    EXPECT_FALSE(f.eof());
+    EXPECT_EQ(*f.getc(), x);
+  }
+} // CharInputOutput

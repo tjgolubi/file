@@ -267,6 +267,7 @@ public:
   /// @requires count > 1.
   /// @return `true` if successful, `false` if end-of-file
   /// @throws std::system_error
+  [[nodiscard]]
   bool gets(not_null<zstring> str, int count) {
     Expects(count > 1);
     auto save = ResetErrno{};
@@ -302,6 +303,7 @@ public:
   /// @return `true` if successful, `false` if end-of-file
   /// @throws std::system_error
   template<std::size_t N=BUFSIZ>
+  [[nodiscard]]
   bool gets(Buffer<N>& str) { return gets(str.data(), std::ssize(str)); }
 
   /// C-style formatted output using std::fprintf
