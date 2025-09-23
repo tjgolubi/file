@@ -1,33 +1,17 @@
-/// @file File.cpp
-/// @brief Implementation of the `tjg::File` class.
+/// @file
+/// This source file provides the implementation of `ModeStr()`
+/// declared in File.hpp, which supports translation of C++ stream modes to
+/// C-style fopen modes.
 ///
-/// This source file provides the implementation of selected member
-/// functions declared in File.h, including `error_string()` and
-/// `ModeStr()`, which support detailed exception reporting and
-/// translation of C++ stream modes to C-style fopen modes.
-///
-/// @see File.h for class definition and documentation.
-/// @date 2025
-/// @copyright
-///   Copyright 2025 Terry Golubiewski. All rights reserved.
-///   Distributed under the MIT License.
+/// @see File.hpp for class definition and documentation.
+/// @copyright 2025 Terry Golubiewski, all rights reserved.
 
-#include "File.h"
+#include "File.hpp"
 
 namespace tjg {
 
-std::string File::error_string(str_arg what) const {
-  const auto& name = _name.generic_string();
-  auto result = std::string{};
-  result.reserve(name.length() + traits_t::length(what) + 8);
-  result.append("File ");
-  result.append(name);
-  result.append(": ");
-  result.append(what);
-  return result;
-} // error_string
-
-File::czstring File::ModeStr(std::ios_base::openmode mode) {
+gsl::czstring ModeStr(std::ios_base::openmode mode) {
+  using gsl::czstring;
 
   static constexpr std::array<czstring, 8> TextModeStrings =
     { "r", "r+", "w", "w+", "wx", "w+x", "a", "a+" };

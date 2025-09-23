@@ -1,6 +1,7 @@
 # Copyright 2025 Terry Golubiewski, all rights reserved.
 
-export PROJDIR := $(abspath ..)
+export PROJNAME := File
+export PROJDIR  := $(abspath ..)
 include $(PROJDIR)/project.mk
 
 APP:=$(abspath $(HOME)/App)
@@ -15,31 +16,54 @@ PROJ_LIB:=$(PROJDIR)/src
 PROJ_INC:=$(PROJDIR)/src
 
 FILE_TEST_EXE=File_test$(DBGSFX).$E
-TARGET1=$(FILE_TEST_EXE)
-TARGETS=$(TARGET1)
+PIPE_TEST_EXE=Pipe_test$(DBGSFX).$E
+TGT1=$(FILE_TEST_EXE)
+TGT2=$(PIPE_TEST_EXE)
+TARGETS=$(TGT1) $(TGT2)
 
 SRC1 := File_test.cpp
-SOURCE := $(SRC1)
+SRC2 := Pipe_test.cpp
+SOURCE := $(SRC1) $(SRC2)
 
-SYSINCL:=$(addsuffix /include, $(GTEST_INC) $(GSL))
+SYSINCL:=$(addsuffix /include, $(GSL) $(GTEST_INC))
 INCLUDE:=$(PROJ_INC)
 
 LIBS=$(PROJ_LIB)/libFile$(COMPILER)$(DBGSFX).$A
 
-LIBPATH=$(GTEST_LIB)
-LDLIBS=-lgtest -lgtest_main
+#DEBUG:=1
+
+LIBPATH:=$(GTEST_LIB)
 
 include $(SWDEV)/$(COMPILER).mk
 include $(SWDEV)/build.mk
 
-.ONESHELL:
+LDLIBS+=-lgtest -lgtest_main
 
-.PHONY: all clean scour run
+SHELL:=/usr/bin/bash
+.ONESHELL:
+.SHELLFLAGS:=-eu -o pipefail -c
+
+.PHONY: all clean scour test success
 
 all: $(TARGETS)
 
-run: $(FILE_TEST_EXE)
-	./$(FILE_TEST_EXE)
+LOGFILES:=$(patsubst %.exe, log/%.json, $(TARGETS))
 
-$(TARGET1): $(OBJ1) $(LIBS)
+log/%.json: %.$E
+	@set -v
+	./$< --gtest_output=json:$(notdir $@)
+	mkdir -p $(dir $@)
+	mv $(notdir $@) $@
+
+CLEAN += log
+
+success:
+	@echo "All tests passed."
+
+test: depend $(LOGFILES) success
+
+$(TGT1): $(OBJ1) $(LIBS)
+	$(LINK)
+
+$(TGT2): $(OBJ2) $(LIBS)
 	$(LINK)

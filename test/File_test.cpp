@@ -1,13 +1,10 @@
-/// @file File_test.cpp
-/// @brief GoogleTest Testing for File.h.
+/// @file
+/// GoogleTest Testing for File.hpp.
 ///
 /// @author Terry Golubiewski
-/// @date 2025
-/// @copyright
-///   Copyright 2025 Terry Golubiewski. All rights reserved.
-///   Distributed under the MIT License.
+/// @copyright 2025 Terry Golubiewski, all rights reserved.
 
-#include "File.h"
+#include "File.hpp"
 
 #include <gtest/gtest.h>
 

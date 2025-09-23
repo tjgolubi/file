@@ -1,18 +1,15 @@
-/// @file File.h
-/// @brief Safe std::FILE* wrapper with exception-based error handling.
+/// @file
+/// Safe std::FILE* wrapper with exception-based error handling.
 ///
-/// This header defines the `tjg::File` class, a thin RAII-style wrapper
+/// This header defines the `tjg::FileHandle` class, a thin RAII-style wrapper
 /// around a `std::FILE*` that supports exception-based error reporting,
 /// filename retention, and safe destructor behavior. It includes helpers
 /// for mode string conversion, error formatting, and line-based reading.
 ///
 /// @author Terry Golubiewski
-/// @date 2025
-/// @copyright
-///   Copyright 2025 Terry Golubiewski. All rights reserved.
-///   Distributed under the MIT License.
+/// @copyright 2025 Terry Golubiewski, all rights reserved.
 ///
-/// @see File.cpp for implementation details.
+/// @see FileHandle.cpp for implementation details.
 
 #pragma once
 
@@ -31,6 +28,7 @@
 #include <utility>
 #include <type_traits>
 #include <cstdio>
+#include <cstring>
 
 namespace tjg {
 
@@ -49,10 +47,77 @@ void LogTerminate(std::format_string<Args...> fmt, Args&&... args) noexcept {
   std::terminate();
 } // LogTerminate
 
-/// @brief Safe std::FILE* wrapper with exception-based error handling.
-class File {
+/// Converts an std::ios_base::openmode to a C-style open mode string.
+/// Throws if the `mode` is invalid.
+/// @return A file open mode string.
+/// @throw std::system_error
+gsl::czstring ModeStr(std::ios_base::openmode mode);
+
+class FilePolicy {
 public:
-  using path = std::filesystem::path;
+  using NameType = std::filesystem::path;
+  using ModeArg  = gsl::not_null<gsl::czstring>;
+private:
+  NameType _name = NameType{};
+  int _close    = 0;
+public:
+  std::string name() const noexcept { return _name.generic_string(); }
+
+  FILE* open(ModeArg mode) const noexcept {
+    return std::fopen(_name.c_str(), mode);
+  }
+
+  bool close(gsl::not_null<FILE*> fp) noexcept {
+    _close = std::fclose(fp);
+    return (_close == 0);
+  }
+
+  int closeCode() const noexcept { return _close; }
+
+  FilePolicy() = default;
+  explicit FilePolicy(NameType name_) noexcept : _name{std::move(name_)} { }
+  FilePolicy(const FilePolicy&)  = delete;
+  FilePolicy& operator=(const FilePolicy&) = default;
+  FilePolicy(FilePolicy&& other) = default;
+  FilePolicy& operator=(FilePolicy&& other) = default;
+}; // FilePolicy
+
+struct PipePolicy {
+public:
+  using NameType = std::string;
+  using ModeArg  = gsl::not_null<gsl::czstring>;
+private:
+  NameType _name = NameType{};
+  int     _close = 0;
+public:
+  const std::string& name() const noexcept { return _name; }
+
+  FILE* open(ModeArg mode) const noexcept {
+    return ::popen(_name.c_str(), mode);
+  }
+
+  bool close(gsl::not_null<FILE*> fp) noexcept {
+    _close = ::pclose(fp);
+    return (_close != -1);
+  }
+
+  int closeCode() const noexcept { return _close; }
+
+  PipePolicy() = default;
+  explicit PipePolicy(NameType name_) noexcept : _name{std::move(name_)} { }
+  PipePolicy(const PipePolicy&)  = delete;
+  PipePolicy& operator=(const PipePolicy& other) = delete;
+  PipePolicy(PipePolicy&& other) = default;
+  PipePolicy& operator=(PipePolicy&& other) = default;
+}; // PipePolicy
+
+/// Safe std::FILE* wrapper with exception-based error handling.
+template<class OpenClosePolicy>
+class FileHandle {
+public:
+  using Policy   = OpenClosePolicy;
+  using NameType = Policy::NameType;
+
   template<typename T> using not_null = gsl::not_null<T>;
   using zstring  = gsl::zstring;
   using czstring = gsl::czstring;
@@ -68,16 +133,25 @@ private:
   static constexpr auto Eof = traits_t::eof();
 
   std::FILE* _fp = nullptr;  /// Wrapped pointer.
-  path _name;                /// File name or user-defined label.
+  Policy _policy = Policy{};
 
   /// Generates an string for an exception "what" message of the form:
-  /// "File <name>: <what>".
-  std::string error_string(str_arg what) const;
+  /// "<name>: <what>".
+  std::string error_string(str_arg what) const {
+    const auto name = _policy.name();
+    auto result = std::string{};
+    result.reserve(name.size() + traits_t::length(what) + 5);
+    result.append("'");
+    result.append(name);
+    result.append("'");
+    result.append(": ");
+    result.append(what);
+    return result;
+  } // error_string
 
   /// Throws a std::system_error with a context message.
-  [[noreturn]] void throw_error(std::errc ec, str_arg what) const {
-    throw std::system_error{std::make_error_code(ec), error_string(what)};
-  }
+  [[noreturn]] void throw_error(std::errc ec, str_arg what) const
+    { throw std::system_error{std::make_error_code(ec), error_string(what)}; }
 
   /// Throws a std::system_error with a context message.
   [[noreturn]] void throw_errno(str_arg what) const {
@@ -102,43 +176,37 @@ public:
   /// Returns `true` if the a file is owned.
   bool is_open() const noexcept { return (_fp != nullptr); }
 
-  /// Returns the name of the owned file
+  /// Returns the name of the owned file.
   /// The filename is retained even after the file is closed.
   /// The filename may be empty even for an open file.
-  const path& name() const noexcept { return _name; }
+  std::string name() const noexcept { return _policy.name(); }
 
   /// Safely closes owned file, terminating on error.
   /// Uses LogTerminate() with an appropriate error message.
-  ~File() noexcept {
+  ~FileHandle() noexcept {
     if (_fp == nullptr)
       return;
-    auto rval = std::fclose(_fp);
-    if (rval == 0)
-      return;
-    LogTerminate("~File: fclose returned {}: errno={}",
-                                                   rval, std::strerror(errno));
+    auto success = _policy.close(_fp);
+    if (!success)
+      LogTerminate("~FileHandle: close returned {}: errno={}",
+                                     _policy.closeCode(), std::strerror(errno));
   }
 
-  /// @brief Closes the file using std::fclose
+  /// Closes the file using std::fclose
   /// Does not clear the file name.
   /// @see https://en.cppreference.com/w/c/io/fclose
   /// @throws std::system_error
-  void close() {
+  int close() {
     if (_fp == nullptr)
-      return;
+      return -1;
     auto save = ResetErrno{};
-    auto err = std::fclose(_fp);
+    auto success = _policy.close(_fp);
     _fp = nullptr;
-    if (err != 0) throw_errno("fclose");
+    if (!success) throw_errno("close");
+    return _policy.closeCode();
   }
 
 private:
-  /// Converts an std::ios_base::openmode to a C-style open mode string.
-  /// Throws if the `mode` is invalid.
-  /// @return A file open mode string.
-  /// @throw std::system_error
-  static czstring ModeStr(std::ios_base::openmode mode);
-
   class ResetErrno {
     int _errno;
   public:
@@ -151,30 +219,30 @@ private:
   /// @throws std::system_error
   void open(str_arg mode) {
     auto save = ResetErrno{};
-    _fp = std::fopen(_name.c_str(), mode);
-    if (_fp == nullptr) throw_errno("fopen");
+    _fp = _policy.open(mode);
+    if (_fp == nullptr) throw_errno("open");
   } // open
 
 public:
   /// No file, no name.
-  File() noexcept = default;
+  FileHandle() noexcept = default;
 
   /// Takes ownership of a std::FILE*
-  explicit File(not_null<FILE*> fp_, path name_=path{}) noexcept
-    : _fp(fp_), _name(std::move(name_)) { }
+  explicit FileHandle(not_null<FILE*> fp_, NameType name_ = NameType{}) noexcept
+    : _fp(fp_), _policy{std::move(name_)} { }
 
   /// Opens a file with a C-style open mode string.
   /// @see https://en.cppreference.com/w/c/io/fopen
   /// @throws std::system_error
-  explicit File(std::filesystem::path name, str_arg mode)
-    : _fp{}, _name{std::move(name)}
+  explicit FileHandle(NameType name_, str_arg mode)
+    : _fp{}, _policy{std::move(name_)}
   { open(mode); }
 
   /// Opens a file with an `openmode` bitmask.
   /// @see https://en.cppreference.com/w/c/io/fopen
   /// @throws std::system_error
-  explicit File(std::filesystem::path name, std::ios_base::openmode mode)
-    : _fp{}, _name{std::move(name)}
+  explicit FileHandle(NameType name, std::ios_base::openmode mode)
+    : _fp{}, _policy{std::move(name)}
   {
     auto str = ModeStr(mode);
     if (!str) throw_error(std::errc::invalid_argument, "invalid open mode");
@@ -184,29 +252,30 @@ public:
   }
 
   /// Move-only
-  File(const File&) = delete;
-  File& operator=(const File& f) = delete;
+  FileHandle(const FileHandle&) = delete;
+  FileHandle& operator=(const FileHandle& f) = delete;
 
   /// Transfer ownership
-  File(File&& f) noexcept : _fp{f._fp}, _name{std::move(f._name)}
+  FileHandle(FileHandle&& f) noexcept
+    : _fp{f._fp}, _policy{std::move(f._policy)}
   { f._fp = nullptr; }
 
   /// Transfer ownership
   /// @throws std::system_error
-  File& operator=(File&& f) {
+  FileHandle& operator=(FileHandle&& f) {
     if (&f == this)
       return *this;
-    close();
+    (void) close();
     _fp   = f._fp;
-    _name = std::move(f._name);
+    _policy = std::move(f._policy);
     f._fp = nullptr;
     return *this;
   }
 
   /// Swap ownership.
-  void swap(File& f) noexcept {
-    std::swap(_fp,   f._fp);
-    std::swap(_name, f._name);
+  void swap(FileHandle& f) noexcept {
+    std::swap(_fp, f._fp);
+    std::swap(_policy, f._policy);
   }
 
   /// Resets the error flags and the end-of-file indicator.
@@ -216,7 +285,7 @@ public:
   /// Checks for end-of-file using std::feof
   /// @see https://en.cppreference.com/w/c/io/feof
   [[nodiscard]]
-  bool eof()   const noexcept { return (std::feof(_fp)   != 0); }
+  bool eof()   const noexcept { return (std::feof(_fp) != 0); }
 
   /// Checks the file stream error state using std::ferror
   /// @see https://en.cppreference.com/w/c/io/ferror
@@ -262,7 +331,8 @@ public:
   /// after the last character written to `str`.
   ///
   /// @param str    Pointer to an element of a char array
-  /// @param count  Maximum number of characters to read (typically the length of `str`) 
+  /// @param count  Maximum number of characters to read
+  ///              (typically the length of `str`)
   /// @see https://en.cppreference.com/w/c/io/fgetc
   /// @requires count > 1.
   /// @return `true` if successful, `false` if end-of-file
@@ -376,7 +446,7 @@ public:
 
   /// C-style formatted input using std::fscanf
   /// @see https://en.cppreference.com/w/c/io/fscanf
-  /// @return The number of items succesfully parsed and stored.
+  /// @return The number of items successfully parsed and stored.
   /// @throw std::system_error
   [[nodiscard]]
   int scanf(str_arg format, auto&... args) {
@@ -538,9 +608,14 @@ public:
     return (rval != Eof);
   }
 
-}; // File
+}; // FileHandle
 
-/// Swap File
-inline void swap(File& lhs, File& rhs) noexcept { lhs.swap(rhs); }
+/// Swap FileHandle
+template<class Policy>
+inline void swap(FileHandle<Policy>& lhs, FileHandle<Policy>& rhs) noexcept
+  { lhs.swap(rhs); }
+
+using File = FileHandle<FilePolicy>;
+using Pipe = FileHandle<PipePolicy>;
 
 } // tjg
