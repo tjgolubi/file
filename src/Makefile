@@ -1,5 +1,8 @@
-# Copyright 2025 Terry Golubiewski, all rights reserved.
+# @file
+# @copyright 2025 Terry Golubiewski, all rights reserved.
+# @author Terry Golubiewski
 
+export PROJNAME:= File
 export PROJDIR := $(abspath ..)
 #SWDEV := $(PROJDIR)/SwDev
 include $(PROJDIR)/project.mk
@@ -16,8 +19,8 @@ PROJ_INC := $(PROJ_SRC)
 
 # Can't use := here because $E will be defined later in $(COMPILER).mk
 FILE_A=$(PROJ_LIB)/libFile$(COMPILER)$(DBGSFX).$A
-TARGET1=$(FILE_A)
-TARGETS=$(TARGET1)
+TGT1=$(FILE_A)
+TARGETS=$(TGT1)
 
 SRC1 := File.cpp
 SOURCE := $(SRC1)
@@ -29,16 +32,18 @@ INCLUDE:=$(PROJ_INC)
 
 LIBS=$(FILE_A)
 
+SHELL:=/bin/bash
+.SHELLFLAGS:=-eu -o pipefail -c
+.ONESHELL:
+
 include $(SWDEV)/$(COMPILER).mk
 include $(SWDEV)/build.mk
-
-.ONESHELL:
 
 .PHONY: all clean scour doxygen
 
 all: $(TARGETS) doxygen
 
-$(TARGET1): $(OBJ1)
+$(TGT1): $(OBJ1)
 
 $(DOX_HTML): $(wildcard *.cpp *.h)
 	cd $(DOX)
